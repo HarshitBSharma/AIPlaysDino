@@ -1,18 +1,17 @@
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.keys import Keys
-import time
-import os
 import cv2
 import numpy as np
-from PIL import Image
-from io import BytesIO
-import base64
+import torch
+import torch.nn as nn
+import torch.optim as optim
 
 
 game_url = "chrome://dino"
 chrome_browser_path = ".//Driver/chromedriver.exe"
 init_script = "document.getElementsByClassName('runner-canvas')[0].id = 'runner-canvas'"
+generation_score = []
 
 class Game():
     def __init__(self, custom_config=True):
@@ -85,8 +84,8 @@ class Game():
 
 # Our Agent who controls the T-Rex
 class Dinosaur():
-    def __init__(self):
-        self.game = Game()
+    def __init__(self, game):
+        self.game = game
         # Jump function is called to start the game
         self.jump()
 
@@ -122,16 +121,21 @@ class GameEnvironment():
 
         image = screenshot(self.game.driver)
         self.display.send(image)
+
+        if self.agent.is_crashed():
+            generation_score.append(score)
+            time.sleep(0.1)
+            self.game.restart()
+            reward = -1
+            is_over = True
+
+        image = image_to_tensor(image)
+
+        return image, reward, is_over, score, highscore
+
         
 
-getbase64script = "canvasRunner = document.getElementById('runner-canvas');\
-                    return canvasRunner.toDataURL().substring(22)"
-
 def screenshot(driver):
-    """image_b64 = driver.execute_script(getbase64script)
-    screen = np.array(cv2.imread(BytesIO(base64.b64decode(image_b64))))
-    image = process_img(screen)
-    return image"""
     filename = './/Screenshots/Screenshot.png'
     driver.save_screenshot(filename)
     image = cv2.imread(filename)
@@ -142,8 +146,8 @@ def process_img(image):
     #image = image[175:800, :]
     image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     image[image>255] = 255
-    image = cv2.resize(84, 84)
-    image = np.reshape(image, (84, 84, 1))
+    image = cv2.resize(image, (84, 84))
+    image = np.reshape(image, (1, 84, 84))
     return image
 
 def show_img():
@@ -156,14 +160,140 @@ def show_img():
             cv2.destroyAllWindows()
             break
 
+def image_to_tensor(image):
+    print(f"Before Transpose: {image.shape}")
+    # image = np.transpose(image, (2, 0, 1))
+    #print(f"After Transpose: {image.shape}")
+    image_tensor = image.astype(np.float32)
+    image_tensor = torch.from_numpy(image)
+    if torch.cuda.is_available():
+        image_tensor = image_tensor.cuda()
+    return image_tensor
 
-"""dino = Dinosaur()
-dino.jump()
-time.sleep(2)
-screen = screenshot(dino.game.driver)
-print(f"Image dimensions: {screen.shape}")
-cv2.imshow('hah', screen)
-cv2.waitKey(0)
-dino.game.close_all()
-#game_env = GameEnvironment(dino, game)"""
 
+dinosaur = Dinosaur()
+dinosaur.jump()
+screen = screenshot(dinosaur.game.driver)
+screen = np.reshape(screen, (84, 84, 1))
+print(f"Screen shape is {screen.shape}")
+"""cv2.imshow("ha", screen)
+cv2.waitKey(0)"""
+
+# Starting to Build our DQN
+class DinoNetwork(nn.Module):
+    def __init__(self):
+        super(DinoNetwork, self).__init__()
+        self.number_of_actions = 3
+        self.gamma = 0.99
+        self.initial_epsilon = 0.1
+        self.final_epsilon = 0.0001
+        self.number_of_iterations = 10000
+        self.replay_memory_size = 1000
+        self.minibatch_size = 1 
+
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(1, 32, 5, 3),
+            nn.ReLU(),
+            nn.BatchNorm2d(32)
+        )
+
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(32, 64, 5, 3),
+            nn.ReLU(),
+            nn.BatchNorm2d(64)
+        )
+
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(64, 64, 3, 3),
+            nn.ReLU(),
+            nn.BatchNorm2d(64)
+        )
+
+        self.fc1 = nn.Sequential(
+            nn.Linear(256, 64),
+            nn.ReLU(),
+            # nn.BatchNorm1d(256)
+        )
+
+        self.fc2 = nn.Sequential(
+            nn.Linear(64, 3)
+        )
+
+
+    def forward(self, inputs):
+        x = self.conv1(inputs)
+        x = self.conv2(x)
+        x = self.conv3(x)
+        print(f"After last conv layer, shape is {x.shape}")
+        x = x.flatten(start_dim=1, end_dim=-1)
+        print(f"After Flattening shape is {x.shape}")
+        x = self.fc1(x)
+        x = self.fc2(x) 
+        return x
+
+
+screen = image_to_tensor(screen)
+screen = torch.reshape(screen, (1, 1, 84, 84))
+screen = screen.type(torch.cuda.FloatTensor)
+model = DinoNetwork()
+model.cuda()
+output = model.forward(screen)
+print(output.shape)
+
+def train(model, start):
+    optimizer = optim.Adam(model.paramaters(), lr=1e-4)
+    criterion = nn.MSELoss()
+
+    game = Game()
+    dino = Dinosaur(game)
+    game_state = GameEnvironment(dino, game)
+
+    replay_memory = []
+
+    actions = torch.zeros([model.number_of_actions], dtype=torch.cuda.float32)
+    action[0] = 1
+
+    image_data, reward, terminal, score, high_score = game_state.get_next_state(action)
+    
+    epsilon = model.initial_epsilon
+    iteration = 0    
+
+    epsilon decrements = np.linspace(model.initial_epsilon, model.final_epsilon, model.number_of_iterations) 
+    while iteration < model.number_of_iterations:
+        output = model(image_data)
+        
+        action = torch.zeros([model.number_of_actions], dtype=torch.float32)
+
+        action = transfer_to_cuda(action)
+        
+        random_action = random.random() <= epsilon
+        action_index = [torch.randint(model.number_of_actions, torch.size([]), dtype = torch.int)
+                        if random_action
+                        else torch.argmax(output)][0]
+
+        action_index = transfer_to_cuda(action_index)
+
+        # Setting the action to 1 because you gotta jump first to start the game
+        action[action_index] = 1
+
+        image_data_1, reward, terminal, score, high_score = game_state.get_next_state(action)
+        
+
+        
+
+
+
+
+
+
+
+
+
+
+
+def transfer_to_cuda(dummy_tensor):
+    if torch.cuda.is_available():
+        dummy_tensor.cuda()
+    return dummy_tensor
+
+    
